@@ -4,13 +4,11 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
-	"errors"
-	"log"
+
 	"server/database"
-	"time"
 )
 
-func generateSecureToken(length int) (string, error) {
+func GenerateSecureToken(length int) (string, error) {
 	buffer := make([]byte, length)
 	_, err := rand.Read(buffer)
 	if err != nil {
@@ -21,7 +19,7 @@ func generateSecureToken(length int) (string, error) {
 }
 
 func CreateSession(db *sql.DB, login string) (string, error) {
-	token, err := generateSecureToken(64)
+	token, err := GenerateSecureToken(64)
 	if err != nil {
 		return "", err
 	}
@@ -34,18 +32,7 @@ func CreateSession(db *sql.DB, login string) (string, error) {
 }
 
 func ValidateSession(db *sql.DB, token string) (string, error) {
+	login, err := database.GetToken(db, token)
 
-	log.Println(token)
-
-	login, expiresAt, err := database.GetToken(db, token)
-	if err != nil {
-		log.Println(err)
-	}
-
-	if time.Now().After(expiresAt) {
-		database.DeleteToken(db, token)
-		return "", errors.New("session expired")
-	}
-
-	return login, nil
+	return login, err
 }
