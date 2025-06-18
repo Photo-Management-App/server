@@ -1,15 +1,17 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
-	"io"
 	"log"
 	"net/http"
 	"os"
-	"strings"
+	"slices"
+	"strconv"
 
 	"server/auth"
 	"server/database"
+	"server/types"
 	usr "server/user"
 
 	_ "github.com/glebarez/go-sqlite"
@@ -30,7 +32,8 @@ type Error struct {
 }
 
 // interface for json needed
-func sendError(w http.ResponseWriter, error Error) {
+func sendError(w http.ResponseWriter, error Error, err error) {
+	log.Println(err)
 	if err := json.NewEncoder(w).Encode(error); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		//http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -41,90 +44,75 @@ func sendError(w http.ResponseWriter, error Error) {
 func (app *app) register(w http.ResponseWriter, r *http.Request) {
 	prepareResponse(w)
 
-	user := struct {
+	input := struct {
 		Login    string `json:"login"`
 		Password string `json:"password"`
+		Email    string `json:"email"`
 	}{}
 
-	err := json.NewDecoder(r.Body).Decode(&user)
+	err := json.NewDecoder(r.Body).Decode(&input)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire json data", "Bad Request"})
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
 		return
 	}
 
-	found, err := database.GetUser(app.DB, user.Login)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), 12)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Database", "Internal Server Error"})
-		return
-	}
-	if found != "" {
-		sendError(w, Error{418, "No tea for this User", "I'm a teapot"})
-	}
-
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), 12)
-	if err != nil {
-		log.Println(err)
-		sendError(w, Error{500, "Could not generate hash from password", "Internal Server Error"})
+		sendError(w, Error{500, "Could not generate hash from password", "Internal Server Error"}, err)
 		return
 	}
 
-	user.Login, err = usr.AddUser(app.DB, user.Login, string(hashedPassword))
+	input.Login, err = usr.AddUser(app.Query, input.Login, string(hashedPassword), input.Email)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{500, "Could not add user", "Internal Server Error"})
+		sendError(w, Error{500, "Could not add user", "Internal Server Error"}, err)
 		return
 	}
 
-	user.Password = strings.Repeat("*", len(user.Password)) // should be changed
-	if err := json.NewEncoder(w).Encode(user); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		//http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	log.Printf("Add user: -- Login: %s - Password: %s", input.Login, input.Password)
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func (app *app) login(w http.ResponseWriter, r *http.Request) {
 	prepareResponse(w)
 
-	user := struct {
+	input := struct {
 		Login    string `json:"login"`
 		Password string `json:"password"`
-		Token    string `json:"token"`
 	}{}
 
-	err := json.NewDecoder(r.Body).Decode(&user)
+	output := struct {
+		Token   string `json:"token"`
+		IsAdmin int    `json:"is_admin"`
+	}{}
+
+	err := json.NewDecoder(r.Body).Decode(&input)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire json data", "Bad Request"})
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
 		return
 	}
 
-	hashedPassword, err := database.GetUser(app.DB, user.Login)
+	user, err := app.Query.GetUserByLogin(app.Ctx, input.Login)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Database", "Internal Server Error"})
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
 	}
 
-	if err = bcrypt.CompareHashAndPassword([]byte(hashedPassword), []byte(user.Password)); err != nil {
-		log.Println(err)
-		sendError(w, Error{401, "Wrong password or login", "Unauthorized"})
+	if err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(input.Password)); err != nil {
+		sendError(w, Error{401, "Wrong password or login", "Unauthorized"}, err)
 		return
 	} else {
-		token, err := auth.CreateSession(app.CACHE, user.Login)
+		output.Token, err = auth.CreateSession(app.CACHE, user.ID)
 		if err != nil {
-			log.Println(err)
-			sendError(w, Error{500, "Could not generate a new token", "Internal Server Error"})
+			sendError(w, Error{500, "Could not generate a new token", "Internal Server Error"}, err)
 			return
 		}
 
-		log.Printf("User: %s - Logged in with token: %s", user.Login, token)
+		log.Printf("Login -- Login: %s - Token: %s", input.Login, output.Token)
 
-		user.Token = token
-		user.Password = strings.Repeat("*", len(user.Password)) // should be changed
-		if err := json.NewEncoder(w).Encode(user); err != nil {
+		output.IsAdmin = int(user.IsAdmin)
+
+		if err := json.NewEncoder(w).Encode(output); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -132,187 +120,254 @@ func (app *app) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *app) logout(w http.ResponseWriter, r *http.Request) {
-	token := struct {
+	input := struct {
 		Token string `json:"token"`
 	}{}
 
-	err := json.NewDecoder(r.Body).Decode(&token)
+	err := json.NewDecoder(r.Body).Decode(&input)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire json data", "Bad Request"})
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
 		return
 	}
 
-	database.DeleteToken(app.CACHE, token.Token)
+	database.DeleteToken(app.CACHE, input.Token)
 
-	token.Token = "" // should be changed
-	if err := json.NewEncoder(w).Encode(token); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		//http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	log.Printf("Logout: -- Removed: %s (maybe valid)", input.Token)
 
+	w.WriteHeader(http.StatusOK)
 }
 
-func (app *app) initFileUpload(w http.ResponseWriter, r *http.Request) {
+func (app *app) uploadFile(w http.ResponseWriter, r *http.Request) {
 	prepareResponse(w)
 
-	metadata := struct {
-		Token    string `json:"token"`
-		Login    string `json:"login"`
-		FileName string `json:"file_name"`
-		Id       string `json:"transaction_id"`
-		// some other data (soon™)
+	type file struct {
+		File     string                 `json:"file"`
+		Metadata database.AddFileParams `json:"metadata"`
+	}
+
+	input := struct {
+		Files []file `json:"files"`
 	}{}
 
-	err := json.NewDecoder(r.Body).Decode(&metadata)
+	err := json.NewDecoder(r.Body).Decode(&input)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire json data", "Bad Request"})
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
 		return
 	}
 
-	metadata.Login, err = auth.ValidateSession(app.CACHE, metadata.Token)
+	id := r.Context().Value("id").(int64)
+
+	user, err := app.Query.GetUser(app.Ctx, id)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{401, "Incorrect Token", "Unauthorized"})
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
 	}
 
-	metadata.Id, err = auth.GenerateSecureToken(128)
+	for _, file := range input.Files {
+		file.Metadata.OwnerID = id
+		id, err := app.Query.AddFile(app.Ctx, file.Metadata)
+		if err != nil {
+			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+			return
+		}
 
-	err = database.InsertUploadMeta(app.CACHE, metadata.Id, metadata.Token)
-	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Database", "Internal Server Error"})
-		return
+		data, err := base64.StdEncoding.DecodeString(file.File)
+		if err != nil {
+			sendError(w, Error{400, "Decoding", "Internal Server Error"}, err)
+			return
+		}
+
+		fileIdStr := strconv.FormatInt(id, 16)
+
+		f, err := os.OpenFile("../storage/users/"+user.Login+"/"+fileIdStr, os.O_WRONLY|os.O_CREATE, 0666)
+		if err != nil {
+			sendError(w, Error{400, "Could not acquire file path", "Internal Server Error"}, err)
+			return
+		}
+
+		f.Write(data)
 	}
 
-	metadata.Token = ""
-	if err := json.NewEncoder(w).Encode(metadata); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-}
-
-func (app *app) fileUpload(w http.ResponseWriter, r *http.Request) {
-	prepareResponse(w)
-
-	r.ParseMultipartForm(32 << 20)
-	token := r.FormValue("token")
-	id := r.FormValue("transaction_id")
-
-	login, err := auth.ValidateSession(app.CACHE, token)
-	if err != nil {
-		log.Println(err)
-		sendError(w, Error{401, "Incorrect Token", "Unauthorized"})
-		return
-	}
-
-	_, err = database.GetUploadMetadata(app.CACHE, id, token)
-	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "No metdata found", "Bad Request"})
-		return
-	}
-
-	file, handler, err := r.FormFile("file")
-	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire the file", "Bad Request"})
-		return
-	}
-	defer file.Close()
-
-	f, err := os.OpenFile("../storage/users/"+login+"/"+handler.Filename, os.O_WRONLY|os.O_CREATE, 0666)
-	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire file path", "Internal Server Error"})
-		return
-	}
-
-	io.Copy(f, file)
-
-	f.Close()
-	log.Printf("File: %s -- Uploaded", handler.Filename)
+	w.WriteHeader(http.StatusOK)
 }
 
 func (app *app) getFileList(w http.ResponseWriter, r *http.Request) {
 	prepareResponse(w)
 
-	files := struct {
-		Token string   `json:"token"`
-		Files []string `json:"files"`
-	}{}
+	id := r.Context().Value("id").(int64)
 
-	if err := json.NewDecoder(r.Body).Decode(&files); err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire json data", "Bad Request"})
-		return
-	}
-
-	login, err := auth.ValidateSession(app.CACHE, files.Token)
+	user, err := app.Query.GetUser(app.Ctx, id)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{401, "Incorrect Token", "Unauthorized"})
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
 	}
 
-	entries, err := os.ReadDir("../storage/users/" + login)
+	files, err := app.Query.GetFiles(app.Ctx, user.ID)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire file path", "Internal Server Error"})
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
 	}
 
-	for _, e := range entries {
-		files.Files = append(files.Files, e.Name())
-	}
-
-	log.Printf("Sending file list")
-	files.Token = ""
 	if err = json.NewEncoder(w).Encode(files); err != nil {
 		log.Println(err)
 		w.WriteHeader(http.StatusInternalServerError)
 	}
 }
 
+type File struct {
+	Id       int64  `json:"id"`
+	FileName string `json:"file_name"`
+	File     string `json:"file"`
+	// checksum
+}
+
 func (app *app) fileDownload(w http.ResponseWriter, r *http.Request) {
-	r.ParseMultipartForm(32 << 20)
-	token := r.FormValue("token")
-	file_name := r.FormValue("file_name")
-	found := 0
+	prepareResponse(w)
 
-	login, err := auth.ValidateSession(app.CACHE, token)
-	if err != nil {
-		log.Println(err)
-		sendError(w, Error{401, "Incorrect Token", "Unauthorized"})
+	input := struct {
+		Token   string  `json:"token"`
+		FileIds []int64 `json:"file_ids"`
+	}{}
+
+	output := struct {
+		Files []File `json:"files"`
+	}{}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
 		return
 	}
 
-	entries, err := os.ReadDir("../storage/users/" + login)
+	id, err := auth.ValidateSession(app.CACHE, input.Token)
 	if err != nil {
-		log.Println(err)
-		sendError(w, Error{400, "Could not acquire file path", "Internal Server Error"})
+		sendError(w, Error{401, "Incorrect Token", "Unauthorized"}, err)
 		return
 	}
 
-	// check if file exists
-	for _, files := range entries {
-		if files.Name() == file_name {
-			found = 1
-			log.Printf("File: %s -- Found", files.Name())
+	user, err := app.Query.GetUser(app.Ctx, int64(id))
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	files, err := app.Query.GetFiles(app.Ctx, user.ID)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	for i := range files {
+		if slices.Contains(input.FileIds, files[i].ID) {
+			file, err := os.ReadFile("../storage/users/" + user.Login + "/" + strconv.FormatInt(files[i].ID, 16))
+			if err != nil {
+				sendError(w, Error{400, "Error opening file:" + output.Files[i].FileName, "Internal Server Error"}, err)
+				return
+			}
+
+			data := base64.StdEncoding.EncodeToString(file)
+			output.Files = append(output.Files, File{Id: files[i].ID, FileName: files[i].FileName, File: data})
 		}
 	}
-	if found == 0 {
-		log.Printf("File: %s -- Not Found", file_name)
-		sendError(w, Error{400, "File not found", "Internal Server Error"})
+
+	if err := json.NewEncoder(w).Encode(&output); err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func (app *app) addAlbum(w http.ResponseWriter, r *http.Request) {
+	intput := struct {
+		AlbumTitle types.JSONNullString `json:"album_title"`
+	}{}
+
+	if err := json.NewDecoder(r.Body).Decode(&intput); err != nil {
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
 		return
 	}
 
-	file, err := os.ReadFile("../storage/users/" + login + "/" + file_name)
+	if err := app.Query.AddAlbum(app.Ctx, intput.AlbumTitle); err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
 
-	log.Printf("File: %s -- Sending", file_name)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (app *app) shareFile(w http.ResponseWriter, r *http.Request) {
+	var input database.AddGuestFileParams
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
+		return
+	}
+
+	url, err := auth.GenerateSecureToken(128)
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		sendError(w, Error{400, "Could not generate URL", "Internal Server Error"}, err)
+		return
+	}
+	input.Url = url
+
+	share, err := app.Query.AddGuestFile(app.Ctx, input)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	output := struct {
+		Url string `json:"url"`
+	}{
+		Url: "shared/" + strconv.Itoa(int(share.ID)) + "/" + share.Url,
+	}
+
+	if err := json.NewEncoder(w).Encode(&output); err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func (app *app) getShareFile(w http.ResponseWriter, r *http.Request) {
+	id := r.Context().Value("id").(int64)
+
+	output, err := app.Query.GetSharedFiles(app.Ctx, id)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(&output); err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func (app *app) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	pass := r.PathValue("pass")
+
+	var input database.GetShareDownloadParams
+	input.ID = int64(id)
+	input.Url = pass
+
+	output, err := app.Query.GetShareDownload(app.Ctx, input)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	login, err := app.Query.GetLogin(app.Ctx, output.OwnerID.Int64)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	file, err := os.ReadFile("../storage/users/" + login + "/" + strconv.FormatInt(output.ID.Int64, 16))
+	if err != nil {
+		sendError(w, Error{400, "Error opening file:" + output.FileName.String, "Internal Server Error"}, err)
+		return
+	}
+
 	w.Write(file)
 }

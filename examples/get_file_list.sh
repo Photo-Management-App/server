@@ -1,8 +1,8 @@
-#/usr/bin/env bash
+#!/usr/bin/env bash
 
-# Usage ./send-meta.sh <token>
+# Usage ./login.sh <login> <password>
 
 curl --header "Content-Type: application/json" \
   --request POST \
   --data '{"token":"'"$1"'"}' \
-  http://localhost:8080/metadata
+  http://localhost:8000/file/list

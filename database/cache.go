@@ -3,86 +3,45 @@ package database
 import (
 	"database/sql"
 	"errors"
+	"log"
 )
 
 func SetupCache(db *sql.DB) error {
-	// Create sessions table
 	_, err := db.Exec(`
-    CREATE TABLE sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        login TEXT NOT NULL,
+    CREATE TABLE sessions ( id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
         token TEXT NOT NULL UNIQUE
     )`)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(`
-    CREATE TABLE uploads (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        token TEXT NOT NULL,
-				transaction_id INTEGER NOT NULL UNIQUE
-    )`)
 
-	return nil
+	return err
 }
 
-func InsertUploadMeta(db *sql.DB, id string, token string) error {
-	//expiresAt := time.Now().Add(24 * time.Hour)
+func InsertToken(db *sql.DB, id int64, token string) error {
+	query := `INSERT INTO sessions (user_id, token) VALUES (?, ?)`
 
-	_, err := db.Exec(`
-        INSERT INTO uploads (token, transaction_id)
-        VALUES (?, ?)`,
-		token, id)
+	_, err := db.Exec(query, id, token)
 	if err != nil {
+		log.Println(err)
 		return err
 	}
 
 	return nil
 }
 
-func GetUploadMetadata(db *sql.DB, id string, token string) (int, error) {
-	var num int
+func GetToken(db *sql.DB, token string) (int64, error) {
+	var id int64
 
 	err := db.QueryRow(`
-        SELECT id FROM uploads 
-        WHERE token = ? AND transaction_id = ?`, token, id).Scan(&num)
+        SELECT user_id FROM sessions
+        WHERE token = ?`, token).Scan(&id)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return -1, errors.New("invalid transaction id or token")
+			return -1, errors.New("invalid session")
 		}
 		return -1, err
 	}
 
-	return num, err
-}
-
-func InsertToken(db *sql.DB, login, token string) error {
-
-	_, err := db.Exec(`
-        INSERT INTO sessions (login, token)
-        VALUES (?, ?)`,
-		login, token)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func GetToken(db *sql.DB, token string) (string, error) {
-	var login string
-
-	err := db.QueryRow(`
-        SELECT login FROM sessions 
-        WHERE token = ?`, token).Scan(&login)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return "", errors.New("invalid session")
-		}
-		return "", err
-	}
-
-	return login, err
+	return id, err
 }
 
 func DeleteToken(db *sql.DB, token string) {
