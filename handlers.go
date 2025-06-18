@@ -301,8 +301,8 @@ func (app *app) shareFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url, err := auth.GenerateSecureToken(128)
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+	url, err := auth.GenerateSecureToken(32)
+	if err != nil {
 		sendError(w, Error{400, "Could not generate URL", "Internal Server Error"}, err)
 		return
 	}
