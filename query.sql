@@ -5,6 +5,18 @@ INSERT INTO users (
   ?, ?, ?
 );
 
+-- name: UpdateUser :one
+UPDATE users
+SET email = ?, profile = ?
+WHERE id = ?
+RETURNING *;
+
+-- name: ChangeRole :one
+UPDATE users
+SET is_admin = ?
+WHERE id = ?
+RETURNING *;
+
 -- name: GetUser :one
 SELECT id, login, password, is_admin FROM users 
 WHERE id = ? LIMIT 1;
@@ -25,12 +37,54 @@ WHERE id = ? LIMIT 1;
 SELECT is_admin FROM users 
 WHERE id = ? LIMIT 1;
 
+-- name: GetProfile :one
+SELECT profile FROM users 
+WHERE id = ? LIMIT 1;
+
+-- name: GetEmail :one
+SELECT email FROM users 
+WHERE id = ? LIMIT 1;
+
 -- name: AddFile :one
 INSERT INTO files (
   owner_id, file_name, title, description, coordinates
 ) VALUES(
   ?, ?, ?, ?, ?
 ) RETURNING id;
+
+-- name: AddTag :one
+INSERT INTO tags (
+  name
+) VALUES (
+  ?
+)
+RETURNING id;
+
+-- name: GetTags :many
+select id, name
+FROM tags;
+
+-- name: GetTagByName :one
+SELECT id, name
+FROM tags
+WHERE name = ?;
+
+-- name: GetTagById :one
+SELECT id, name
+FROM tags
+WHERE id = ?;
+
+-- name: TagsConnect :exec
+INSERT INTO fileTags (
+  file_id, tag_id
+) VALUES (
+  ?, ?
+);
+
+-- name: GetTagsByFile :many
+SELECT tag_id 
+FROM fileTags
+WHERE file_id = ?;
 
 -- name: GetFiles :many
 SELECT id, file_name FROM files 
@@ -65,7 +119,13 @@ INSERT INTO album (
   ?
 );
 
--- name: getAlbums :many
-SELECT title FROM album
-WHERE user_id;
+-- name: GetAlbums :many
+SELECT * FROM album;
+
+-- name: AddToAlbum :exec
+INSERT INTO fileAlbum (
+  file_id, album_id
+) VALUES (
+  ?, ?
+)
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"log"
@@ -73,6 +74,27 @@ func (app *app) register(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (app *app) updateUser(w http.ResponseWriter, r *http.Request) {
+	var input database.UpdateUserParams
+	err := json.NewDecoder(r.Body).Decode(&input)
+	if err != nil {
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
+		return
+	}
+
+	output, err := app.Query.UpdateUser(app.Ctx, input)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	output.Password = ""
+	if err := json.NewEncoder(w).Encode(output); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
 func (app *app) login(w http.ResponseWriter, r *http.Request) {
 	prepareResponse(w)
 
@@ -83,6 +105,8 @@ func (app *app) login(w http.ResponseWriter, r *http.Request) {
 
 	output := struct {
 		Token   string `json:"token"`
+		Profile string `json:"profile"`
+		Email   string `json:"email"`
 		IsAdmin int    `json:"is_admin"`
 	}{}
 
@@ -108,9 +132,23 @@ func (app *app) login(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		profile, err := app.Query.GetProfile(app.Ctx, user.ID)
+		if err != nil {
+			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+			return
+		}
+
+		email, err := app.Query.GetEmail(app.Ctx, user.ID)
+		if err != nil {
+			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+			return
+		}
+
 		log.Printf("Login -- Login: %s - Token: %s", input.Login, output.Token)
 
 		output.IsAdmin = int(user.IsAdmin)
+		output.Profile = profile.String
+		output.Email = email.String
 
 		if err := json.NewEncoder(w).Encode(output); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -143,6 +181,7 @@ func (app *app) uploadFile(w http.ResponseWriter, r *http.Request) {
 	type file struct {
 		File     string                 `json:"file"`
 		Metadata database.AddFileParams `json:"metadata"`
+		Tags     []string               `json:"tags"`
 	}
 
 	input := struct {
@@ -186,6 +225,25 @@ func (app *app) uploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 
 		f.Write(data)
+
+		for _, tag := range file.Tags {
+			tagDB, err := app.Query.GetTagByName(app.Ctx, tag)
+			if err != nil && err != sql.ErrNoRows {
+				sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+				return
+			}
+
+			if sql.ErrNoRows == err {
+				tagDB.ID, err = app.Query.AddTag(app.Ctx, tag)
+			}
+
+			err = app.Query.TagsConnect(app.Ctx, database.TagsConnectParams{FileID: id, TagID: tagDB.ID})
+			if err != nil && err != sql.ErrNoRows {
+				sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+				return
+			}
+		}
+
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -195,6 +253,14 @@ func (app *app) getFileList(w http.ResponseWriter, r *http.Request) {
 	prepareResponse(w)
 
 	id := r.Context().Value("id").(int64)
+	type File struct {
+		File database.GetFilesRow `json:"file"`
+		Tags []string             `json:"tags"`
+	}
+
+	output := struct {
+		File []File `json:"file"`
+	}{}
 
 	user, err := app.Query.GetUser(app.Ctx, id)
 	if err != nil {
@@ -208,7 +274,26 @@ func (app *app) getFileList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err = json.NewEncoder(w).Encode(files); err != nil {
+	for _, file := range files {
+		tags, err := app.Query.GetTagsByFile(app.Ctx, file.ID)
+		if err != nil {
+			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+			return
+		}
+
+		var tagNames []string
+		for _, tagID := range tags {
+			tagName, err := app.Query.GetTagById(app.Ctx, tagID)
+			if err != nil {
+				sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+				return
+			}
+			tagNames = append(tagNames, tagName.Name)
+		}
+		output.File = append(output.File, File{File: file, Tags: tagNames})
+	}
+
+	if err = json.NewEncoder(w).Encode(&output); err != nil {
 		log.Println(err)
 		w.WriteHeader(http.StatusInternalServerError)
 	}
@@ -276,6 +361,20 @@ func (app *app) fileDownload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (app *app) getTags(w http.ResponseWriter, r *http.Request) {
+	output, err := app.Query.GetTags(app.Ctx)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(&output); err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
 func (app *app) addAlbum(w http.ResponseWriter, r *http.Request) {
 	intput := struct {
 		AlbumTitle types.JSONNullString `json:"album_title"`
@@ -287,6 +386,35 @@ func (app *app) addAlbum(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := app.Query.AddAlbum(app.Ctx, intput.AlbumTitle); err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (app *app) getAlbums(w http.ResponseWriter, r *http.Request) {
+	output, err := app.Query.GetAlbums(app.Ctx)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(&output); err != nil {
+		log.Println(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func (app *app) addFileToAlbum(w http.ResponseWriter, r *http.Request) {
+	var input database.AddToAlbumParams
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
+		return
+	}
+
+	if err := app.Query.AddToAlbum(app.Ctx, input); err != nil {
 		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
 	}

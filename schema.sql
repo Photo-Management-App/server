@@ -3,6 +3,7 @@ CREATE TABLE users (
   login TEXT NOT NULL UNIQUE,
   password TEXT NOT NULL,
   email TEXT,
+  profile TEXT,
   is_admin INTEGER NOT NULL DEFAULT 0
 );
 
@@ -26,20 +27,25 @@ CREATE TABLE fileGuestShares (
   FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 
-
--- New Tags table
 CREATE TABLE tags (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE
 );
 
--- Join table to associate Files and Tags
 CREATE TABLE fileTags (
   file_id INTEGER NOT NULL,
   tag_id INTEGER NOT NULL,
   PRIMARY KEY (file_id, tag_id),
   FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
   FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+);
+
+CREATE TABLE fileAlbum (
+  file_id INTEGER NOT NULL,
+  album_id INTEGER NOT NULL,
+  PRIMARY KEY (file_id, album_id),
+  FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+  FOREIGN KEY (album_id) REFERENCES album(id) ON DELETE CASCADE
 );
 
 CREATE TABLE album (

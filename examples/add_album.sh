@@ -1,15 +1,8 @@
 #!/usr/bin/env bash
 
-TMP_JSON=$(mktemp)
+# Usage ./get_albums.sh <token>
 
-cat > "$TMP_JSON" <<EOF
-{
-  "token": "'"$1"'"
-}
-EOF
-
-curl -X POST "localhost:8080/album/add" \
-  -H "Content-Type: application/json" \
-  -d @"$TMP_JSON"
-
-rm "$TMP_JSON"
+curl --header "Content-Type: application/json" \
+  --request POST \
+  --data '{"token":"'"$1"'", "album_title":"'"$2"'"}' \
+  http://localhost:8000/album/add
