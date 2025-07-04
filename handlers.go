@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +15,7 @@ import (
 
 	"server/auth"
 	"server/database"
+	"server/types"
 	usr "server/user"
 
 	_ "github.com/glebarez/go-sqlite"
@@ -20,7 +24,6 @@ import (
 
 func prepareResponse(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Credentials", "true")
 	w.Header().Set("Content-Type", "application/json")
 }
 
@@ -74,15 +77,32 @@ func (app *app) register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *app) updateUser(w http.ResponseWriter, r *http.Request) {
-	prepareResponse(w)
-	var input database.UpdateUserParams
+
+	input := struct {
+		Email   string `json:"email"`
+		Profile string `json:"profile"`
+		Token   string `json:"token"`
+	}{}
+
 	err := json.NewDecoder(r.Body).Decode(&input)
 	if err != nil {
 		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
 		return
 	}
 
-	output, err := app.Query.UpdateUser(app.Ctx, input)
+	id, err := auth.ValidateSession(app.CACHE, input.Token)
+	if err != nil {
+		sendError(w, Error{401, "Incorrect Token", "Unauthorized"}, err)
+		return
+	}
+
+	userParams := database.UpdateUserParams{
+		ID:      int64(id),
+		Email:   types.JSONNullString{NullString: sql.NullString{String: input.Email, Valid: input.Email != ""}},
+		Profile: types.JSONNullString{NullString: sql.NullString{String: input.Profile, Valid: input.Profile != ""}},
+	}
+
+	output, err := app.Query.UpdateUser(app.Ctx, userParams)
 	if err != nil {
 		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
@@ -177,7 +197,6 @@ func (app *app) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *app) uploadFile(w http.ResponseWriter, r *http.Request) {
-	prepareResponse(w)
 
 	type file struct {
 		File     string                 `json:"file"`
@@ -205,15 +224,21 @@ func (app *app) uploadFile(w http.ResponseWriter, r *http.Request) {
 
 	for _, file := range input.Files {
 		file.Metadata.OwnerID = id
-		id, err := app.Query.AddFile(app.Ctx, file.Metadata)
-		if err != nil {
-			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
-			return
-		}
 
 		data, err := base64.StdEncoding.DecodeString(file.File)
 		if err != nil {
 			sendError(w, Error{400, "Decoding", "Internal Server Error"}, err)
+			return
+		}
+
+		hash := sha256.Sum256(data)
+		checksum := hex.EncodeToString(hash[:])
+
+		file.Metadata.Checksum = checksum
+
+		id, err := app.Query.AddFile(app.Ctx, file.Metadata)
+		if err != nil {
+			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 			return
 		}
 
@@ -250,8 +275,52 @@ func (app *app) uploadFile(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+func (app *app) deleteFile(w http.ResponseWriter, r *http.Request) {
+	input := struct {
+		FileId int64 `json:"file_id"`
+	}{}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
+		return
+	}
+
+	id := r.Context().Value("id").(int64)
+	user, err := app.Query.GetUser(app.Ctx, id)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	file, err := app.Query.GetFile(app.Ctx, input.FileId)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	if file.OwnerID != id && user.IsAdmin == 0 {
+		sendError(w, Error{403, "You do not have permission to delete this file", "Forbidden"}, nil)
+		return
+	}
+
+	if err := os.Remove("../storage/users/" + user.Login + "/" + strconv.FormatInt(file.ID, 16)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			log.Printf("File %s does not exist, but database entry will be removed anyway", file.FileName)
+		}
+		sendError(w, Error{400, "Could not remove file from storage", "Internal Server Error"}, err)
+		return
+	}
+
+	if err := app.Query.DeleteFile(app.Ctx, input.FileId); err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+
+}
+
 func (app *app) getFileList(w http.ResponseWriter, r *http.Request) {
-	prepareResponse(w)
 
 	id := r.Context().Value("id").(int64)
 	type File struct {
@@ -304,11 +373,10 @@ type File struct {
 	Id       int64  `json:"id"`
 	FileName string `json:"file_name"`
 	File     string `json:"file"`
-	// checksum
+	Checksum string `json:"checksum"`
 }
 
 func (app *app) fileDownload(w http.ResponseWriter, r *http.Request) {
-	prepareResponse(w)
 
 	input := struct {
 		Token   string  `json:"token"`
@@ -332,13 +400,13 @@ func (app *app) fileDownload(w http.ResponseWriter, r *http.Request) {
 
 	user, err := app.Query.GetUser(app.Ctx, int64(id))
 	if err != nil {
-		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		sendError(w, Error{400, "Database, Get User", "Internal Server Error"}, err)
 		return
 	}
 
 	files, err := app.Query.GetFiles(app.Ctx, user.ID)
 	if err != nil {
-		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		sendError(w, Error{400, "Database, Get Files", "Internal Server Error"}, err)
 		return
 	}
 
@@ -351,7 +419,16 @@ func (app *app) fileDownload(w http.ResponseWriter, r *http.Request) {
 			}
 
 			data := base64.StdEncoding.EncodeToString(file)
-			output.Files = append(output.Files, File{Id: files[i].ID, FileName: files[i].FileName, File: data})
+
+			hash := sha256.Sum256(file)
+			checksum := hex.EncodeToString(hash[:])
+
+			if checksum != files[i].Checksum {
+				sendError(w, Error{400, "Checksum mismatch for file: " + output.Files[i].FileName, "Internal Server Error"}, nil)
+				return
+			}
+
+			output.Files = append(output.Files, File{Id: files[i].ID, FileName: files[i].FileName, File: data, Checksum: files[i].Checksum})
 		}
 	}
 
@@ -378,18 +455,31 @@ func (app *app) getTags(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *app) addAlbum(w http.ResponseWriter, r *http.Request) {
-	prepareResponse(w)
-	intput := struct {
+	input := struct {
 		AlbumTitle database.AddAlbumParams `json:"album_title"`
 	}{}
 
-	if err := json.NewDecoder(r.Body).Decode(&intput); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
 		return
 	}
-	intput.AlbumTitle.OwnerID = r.Context().Value("id").(int64)
+	input.AlbumTitle.OwnerID = r.Context().Value("id").(int64)
 
-	if err := app.Query.AddAlbum(app.Ctx, intput.AlbumTitle); err != nil {
+	if input.AlbumTitle.CoverID.Valid {
+		covetFile, err := app.Query.GetFile(app.Ctx, input.AlbumTitle.CoverID.Int64)
+		if err != nil {
+			sendError(w, Error{400, "Cover file not found", "Internal Server Error"}, err)
+			return
+		}
+
+		if covetFile.OwnerID != input.AlbumTitle.OwnerID {
+			sendError(w, Error{403, "Cover file does not belong to the user", "Bad Request"}, nil)
+			return
+		}
+
+	}
+
+	if err := app.Query.AddAlbum(app.Ctx, input.AlbumTitle); err != nil {
 		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
 	}
@@ -398,13 +488,62 @@ func (app *app) addAlbum(w http.ResponseWriter, r *http.Request) {
 }
 
 func (app *app) getAlbums(w http.ResponseWriter, r *http.Request) {
-	prepareResponse(w)
+
+	output := struct {
+		Albums []database.Album `json:"albums"`
+		Covers []File           `json:"album_cover"`
+	}{}
+
 	id := r.Context().Value("id").(int64)
 
-	output, err := app.Query.GetAlbums(app.Ctx, id)
+	user, err := app.Query.GetUser(app.Ctx, int64(id))
 	if err != nil {
 		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
+	}
+
+	albums, err := app.Query.GetAlbums(app.Ctx, id)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	output.Albums = albums
+
+	for _, album := range albums {
+		if album.CoverID.Valid {
+
+			cover, err := app.Query.GetFile(app.Ctx, album.CoverID.Int64)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					output.Covers = append(output.Covers, File{})
+					continue
+				}
+				sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+				return
+			}
+
+			coverFile, err := os.ReadFile("../storage/users/" + user.Login + "/" + strconv.FormatInt(cover.ID, 16))
+			if err != nil {
+				sendError(w, Error{400, "Error opening file:" + cover.FileName, "Internal Server Error"}, err)
+				return
+			}
+
+			data := base64.StdEncoding.EncodeToString(coverFile)
+
+			hash := sha256.Sum256(coverFile)
+			checksum := hex.EncodeToString(hash[:])
+
+			if checksum != cover.Checksum {
+				sendError(w, Error{400, "Checksum mismatch for file: " + cover.FileName, "Internal Server Error"}, nil)
+				return
+			}
+
+			output.Covers = append(output.Covers, File{Id: cover.ID, FileName: cover.FileName, File: data, Checksum: cover.Checksum})
+		} else {
+			output.Covers = append(output.Covers, File{})
+		}
+
 	}
 
 	if err := json.NewEncoder(w).Encode(&output); err != nil {
@@ -422,9 +561,93 @@ func (app *app) addFileToAlbum(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	id := r.Context().Value("id").(int64)
+	file, err := app.Query.GetFile(app.Ctx, input.FileID)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	if file.OwnerID != id {
+		sendError(w, Error{403, "You do not own this file", "Forbidden"}, nil)
+		return
+	}
+
+	album, err := app.Query.GetAlbum(app.Ctx, input.AlbumID)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	if album.OwnerID != id {
+		sendError(w, Error{403, "You do not own this album", "Forbidden"}, nil)
+		return
+	}
+
 	if err := app.Query.AddToAlbum(app.Ctx, input); err != nil {
 		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (app *app) addFileToAlbumByTag(w http.ResponseWriter, r *http.Request) {
+	input := struct {
+		AlbumID int64    `json:"album_id"`
+		Tags    []string `json:"tags"`
+	}{}
+
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		sendError(w, Error{400, "Could not acquire json data", "Bad Request"}, err)
+		return
+	}
+
+	id := r.Context().Value("id").(int64)
+
+	album, err := app.Query.GetAlbum(app.Ctx, input.AlbumID)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	if album.OwnerID != id {
+		sendError(w, Error{403, "You do not own this album", "Forbidden"}, nil)
+		return
+	}
+
+	for _, tagName := range input.Tags {
+
+		tag, err := app.Query.GetTagByName(app.Ctx, tagName)
+		if err != nil {
+			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+			return
+		}
+
+		files, err := app.Query.GetFilesByTag(app.Ctx, database.GetFilesByTagParams{TagID: tag.ID, OwnerID: id})
+		if err != nil {
+			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+			return
+		}
+
+		for _, file := range files {
+
+			if file.ID.Valid {
+
+				toadd := database.AddToAlbumParams{
+					FileID:  file.ID.Int64,
+					AlbumID: input.AlbumID,
+				}
+
+				if err := app.Query.AddToAlbum(app.Ctx, toadd); err != nil {
+					sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+					return
+				}
+
+			}
+
+		}
+
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -493,7 +716,13 @@ func (app *app) getShareFile(w http.ResponseWriter, r *http.Request) {
 	prepareResponse(w)
 	id := r.Context().Value("id").(int64)
 
-	output, err := app.Query.GetSharedFiles(app.Ctx, id)
+	user, err := app.Query.GetUser(app.Ctx, id)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	output, err := app.Query.GetSharedFiles(app.Ctx, database.GetSharedFilesParams{OwnerID: id, IsAdmin: user.IsAdmin})
 	if err != nil {
 		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
 		return
@@ -521,6 +750,23 @@ func (app *app) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uses, err := app.Query.GetShareUseCount(app.Ctx, input.ID)
+	if err != nil {
+		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+		return
+	}
+
+	if uses.Valid {
+		if uses.Int64 <= 0 {
+			sendError(w, Error{400, "Share has no uses left", "Bad Request"}, nil)
+			return
+		}
+		if err := app.Query.DecrementShareUses(app.Ctx, input.ID); err != nil {
+			sendError(w, Error{400, "Database", "Internal Server Error"}, err)
+			return
+		}
+	}
+
 	login, err := app.Query.GetLogin(app.Ctx, output.OwnerID.Int64)
 	if err != nil {
 		sendError(w, Error{400, "Database", "Internal Server Error"}, err)
@@ -530,6 +776,14 @@ func (app *app) downloadSharedFile(w http.ResponseWriter, r *http.Request) {
 	file, err := os.ReadFile("../storage/users/" + login + "/" + strconv.FormatInt(output.ID.Int64, 16))
 	if err != nil {
 		sendError(w, Error{400, "Error opening file:" + output.FileName.String, "Internal Server Error"}, err)
+		return
+	}
+
+	hash := sha256.Sum256(file)
+	checksum := hex.EncodeToString(hash[:])
+
+	if checksum != output.Checksum.String {
+		sendError(w, Error{400, "Checksum mismatch for file: " + output.FileName.String, "Internal Server Error"}, nil)
 		return
 	}
 
