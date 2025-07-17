@@ -29,7 +29,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	dbCache, err := sql.Open("sqlite", "file::memory:?cache=shared")
+	dbCache, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		log.Fatal(err)
 	}

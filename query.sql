@@ -97,7 +97,7 @@ WHERE fileTags.tag_id = ? AND files.owner_id = ?;
 
 
 -- name: GetFiles :many
-SELECT id, file_name, checksum, created_at FROM files 
+SELECT id, file_name, checksum, created_at, description, coordinates FROM files 
 WHERE owner_id = ?;
 
 -- name: GetFile :one
@@ -142,9 +142,9 @@ WHERE id = ? AND max_uses > 0;
 
 -- name: AddAlbum :exec
 INSERT INTO album (
-  title, owner_id, cover_id
+  title, owner_id, cover_id, description
 ) VALUES (
-  ?, ?, ?
+  ?, ?, ?, ?
 );
 
 -- name: GetAlbums :many
@@ -161,6 +161,11 @@ INSERT OR IGNORE INTO fileAlbum (
 ) VALUES (
   ?, ?
 );
+
+-- name: SetAlbumCover :exec
+UPDATE album
+SET cover_id = ?
+WHERE id = ?;
 
 -- name: GetFileFromAlbum :many
 SELECT file_id

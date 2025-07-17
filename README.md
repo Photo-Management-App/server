@@ -1,62 +1,54 @@
-# Prerequisites
-- **Go 1.18+** installed and added to your PATH.
-If you don’t have Go installed yet, you can download it here: https://go.dev/dl/
-- Terminal:
-  - PowerShell / CMD (for Windows)
-  - Git Bash / WSL / Linux terminal (for bash scripts)
+# 🧠 Go Backend Server Setup Guide
 
-## ⚙️ Building the server
+Follow these steps to build and run the backend server:
 
-1. Open your terminal and navigate to the repository folder:
+## 1. 📥 Install Go
+
+Make sure **Go (version 1.21 or higher)** is installed and added to your system PATH.  
+👉 [Download it here](https://go.dev/dl/)
+
+---
+
+## 2. 📂 Clone the Repository
+
+Open your terminal and run:
 ```bash
-cd PATH_TO_YOUR_REPOSITORY
-```
-2. build the server (this will generate a <b>server.exe</b> file):
-
-```bash
-go build 
-```
-
-## Running the server
-After building, start the server:
-
-```bash
-./server.exe
+git clone https://github.com/Photo-Management-App/Go-Server.git
+cd go-server
 ```
 
-The server listens on port **8080**
+---
 
-If it starts successfully, you should see a message like:
+## 3. 🏗️ Build the Server
 
+To compile the server and generate the executable, run:
 ```bash
-Server running on port 8080...
+go build
 ```
 
-📁 Examples in the examples/ folder
-The project includes an examples/ directory with helper scripts for API testing.
+This will create:
+- `server.exe` on **Windows**
+- `server` binary on **Linux/macOS**
 
-# Example usage 
-Located at:
+---
 
-```bash
-examples/login.sh
-```
+## 4. 🚀 Run the Server
 
-# How to use
-1. Navigate into the examples folder:
+Start the server with the appropriate command:
 
 ```bash
-cd examples
+./server.exe   # On Windows
+./server       # On Linux/macOS
 ```
 
-2. Make sure the script is executable:
+---
 
+## 5. 🧪 (Optional) Run Example Scripts
+
+Example bash scripts are located in the `examples/` directory.  
+To run a script:
 ```bash
-chmod +x login.sh
+./examples/<file>.sh
 ```
 
-3. Run the script with your credentials:
-
-```bash
-./login.sh user pass
-```
+> 💡 Use **Git Bash**, **WSL**, or a **Linux terminal** on Windows to run `.sh` scripts.

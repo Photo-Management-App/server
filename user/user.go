@@ -14,7 +14,7 @@ import (
 
 func AddUser(query *database.Queries, login, passwordHash, email string) (string, error) {
 	// Sanitize user input
-	login = strings.ReplaceAll(login, "/", "∕")
+	login = strings.Replace(login, "/", "∕", -1)
 	login = strings.TrimSpace(login)
 
 	if login == "" || passwordHash == "" {
